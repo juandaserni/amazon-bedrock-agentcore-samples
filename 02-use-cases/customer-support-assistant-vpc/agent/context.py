@@ -13,7 +13,7 @@ class CustomerSupportContext:
     _agent: Optional[Agent] = None
     _mcp_client: Optional[MCPClient] = None
     _gateway_client: Optional[MCPClient] = None
-    _aurora_mcp_client: Optional[MCPClient] = None
+    _neon_mcp_client: Optional[MCPClient] = None
 
     # Context variables for application state
     _mcp_token_ctx: ContextVar[Optional[str]] = ContextVar("mcp_token", default=None)
@@ -27,8 +27,8 @@ class CustomerSupportContext:
     _gateway_client_ctx: ContextVar[Optional[MCPClient]] = ContextVar(
         "gateway_client", default=None
     )
-    _aurora_mcp_client_ctx: ContextVar[Optional[MCPClient]] = ContextVar(
-        "aurora_client", default=None
+    _neon_mcp_client_ctx: ContextVar[Optional[MCPClient]] = ContextVar(
+        "neon_client", default=None
     )
 
     @classmethod
@@ -50,22 +50,22 @@ class CustomerSupportContext:
         cls._mcp_token_ctx.set(token)
 
     @classmethod
-    def get_aurora_mcp_client_ctx(
+    def get_neon_mcp_client_ctx(
         cls,
     ) -> Optional[MCPClient]:
         # First try to get from global state for persistence across calls
-        if cls._aurora_mcp_client:
-            return cls._aurora_mcp_client
+        if cls._neon_mcp_client:
+            return cls._neon_mcp_client
         try:
-            return cls._aurora_mcp_client_ctx.get()
+            return cls._neon_mcp_client_ctx.get()
         except LookupError:
             return None
 
     @classmethod
-    def set_aurora_mcp_client_ctx(cls, client: MCPClient) -> None:
+    def set_neon_mcp_client_ctx(cls, client: MCPClient) -> None:
         # Set both global state and context variable
-        cls._aurora_mcp_client = client
-        cls._aurora_mcp_client_ctx.set(client)
+        cls._neon_mcp_client = client
+        cls._neon_mcp_client_ctx.set(client)
 
     # @classmethod
     # def get_response_queue_ctx(

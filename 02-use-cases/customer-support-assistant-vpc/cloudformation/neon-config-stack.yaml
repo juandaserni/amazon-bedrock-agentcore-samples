@@ -1,0 +1,169 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Neon database configuration stack - stores connection credentials in Secrets Manager'
+
+Parameters:
+  Environment:
+    Type: String
+    Default: 'dev'
+    AllowedValues:
+      - dev
+      - test
+      - prod
+    Description: 'Environment name for resource naming'
+
+  NeonHost:
+    Type: String
+    Description: 'Neon database host (e.g., ep-xxx-xxx.us-west-2.aws.neon.tech)'
+    NoEcho: false
+
+  NeonDatabase:
+    Type: String
+    Default: 'neondb'
+    Description: 'Neon database name'
+
+  NeonUser:
+    Type: String
+    Description: 'Neon database username'
+    NoEcho: false
+
+  NeonPassword:
+    Type: String
+    Description: 'Neon database password'
+    NoEcho: true
+
+  NeonPort:
+    Type: String
+    Default: '5432'
+    Description: 'Neon database port'
+
+Resources:
+  # KMS Key for Secrets Manager encryption
+  NeonSecretsKMSKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: 'KMS Key for Neon credentials encryption'
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: Enable IAM User Permissions
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root'
+            Action: 'kms:*'
+            Resource: '*'
+          - Sid: Allow Secrets Manager
+            Effect: Allow
+            Principal:
+              Service: secretsmanager.amazonaws.com
+            Action:
+              - kms:Decrypt
+              - kms:DescribeKey
+              - kms:GenerateDataKey
+            Resource: '*'
+
+  NeonSecretsKMSKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub 'alias/csvpc-neon-${Environment}-secrets'
+      TargetKeyId: !Ref NeonSecretsKMSKey
+
+  # Secrets Manager Secret for Neon credentials
+  NeonDatabaseSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub '/app/customersupportvpc/neon/credentials'
+      Description: 'Neon database connection credentials'
+      KmsKeyId: !Ref NeonSecretsKMSKey
+      SecretString: !Sub |
+        {
+          "host": "${NeonHost}",
+          "port": "${NeonPort}",
+          "database": "${NeonDatabase}",
+          "username": "${NeonUser}",
+          "password": "${NeonPassword}",
+          "sslmode": "require"
+        }
+      Tags:
+        - Key: Name
+          Value: !Sub 'csvpc-neon-${Environment}-db-credentials'
+        - Key: Environment
+          Value: !Ref Environment
+
+  # SSM Parameters for easy access
+  NeonHostParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub '/app/customersupportvpc/neon/host'
+      Description: 'Neon database host'
+      Type: String
+      Value: !Ref NeonHost
+      Tags:
+        Environment: !Ref Environment
+
+  NeonDatabaseParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub '/app/customersupportvpc/neon/database'
+      Description: 'Neon database name'
+      Type: String
+      Value: !Ref NeonDatabase
+      Tags:
+        Environment: !Ref Environment
+
+  NeonPortParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub '/app/customersupportvpc/neon/port'
+      Description: 'Neon database port'
+      Type: String
+      Value: !Ref NeonPort
+      Tags:
+        Environment: !Ref Environment
+
+  NeonConnectionStringParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub '/app/customersupportvpc/neon/connection_string'
+      Description: 'Neon database connection string (without password)'
+      Type: String
+      Value: !Sub 'postgresql://${NeonUser}:***@${NeonHost}:${NeonPort}/${NeonDatabase}?sslmode=require'
+      Tags:
+        Environment: !Ref Environment
+
+Outputs:
+  StackName:
+    Description: 'Stack name for cross-stack references'
+    Value: !Ref AWS::StackName
+    Export:
+      Name: !Sub '${AWS::StackName}-StackName'
+
+  NeonSecretArn:
+    Description: 'ARN of the Neon credentials secret'
+    Value: !Ref NeonDatabaseSecret
+    Export:
+      Name: !Sub '${AWS::StackName}-SecretArn'
+
+  NeonHost:
+    Description: 'Neon database host'
+    Value: !Ref NeonHost
+    Export:
+      Name: !Sub '${AWS::StackName}-Host'
+
+  NeonDatabase:
+    Description: 'Neon database name'
+    Value: !Ref NeonDatabase
+    Export:
+      Name: !Sub '${AWS::StackName}-Database'
+
+  NeonPort:
+    Description: 'Neon database port'
+    Value: !Ref NeonPort
+    Export:
+      Name: !Sub '${AWS::StackName}-Port'
+
+  NeonKMSKeyId:
+    Description: 'KMS Key ID for Neon secrets encryption'
+    Value: !Ref NeonSecretsKMSKey
+    Export:
+      Name: !Sub '${AWS::StackName}-KMSKeyId'
