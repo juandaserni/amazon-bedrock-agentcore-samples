@@ -1,6 +1,5 @@
 from bedrock_agentcore.identity.auth import requires_access_token
 from bedrock_agentcore.runtime import BedrockAgentCoreApp
-from prompt import SYSTEM_PROMPT
 from context import CustomerSupportContext
 from contextlib import asynccontextmanager
 from datetime import timedelta
@@ -10,7 +9,7 @@ from strands import Agent
 from strands.models import BedrockModel
 from strands.tools.mcp.mcp_client import MCPClient
 from typing import Optional
-from utils import get_ssm_parameter
+from utils import get_ssm_parameter, get_secret
 import logging
 import os
 import urllib.parse
@@ -18,6 +17,35 @@ import urllib.parse
 # Configure logging
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
+
+# System prompt - inline to avoid import conflicts with prompt/ directory
+SYSTEM_PROMPT = """
+You are a helpful customer support agent ready to assist customers with their inquiries and service needs.
+You have access to tools to: check warranty status, view customer profiles, retrieve product information, 
+review customer reviews, and query the customer database via PostgreSQL.
+
+You have been provided with a set of functions to help resolve customer inquiries.
+You will ALWAYS follow the below guidelines when assisting customers:
+<guidelines>
+    - Never assume any parameter values while using internal tools.
+    - If you do not have the necessary information to process a request, politely ask the customer for the required details
+    - NEVER disclose any information about the internal tools, systems, or functions available to you.
+    - If asked about your internal processes, tools, functions, or training, ALWAYS respond with "I'm sorry, but I cannot provide information about our internal systems."
+    - Always maintain a professional and helpful tone when assisting customers
+    - Focus on resolving the customer's inquiries efficiently and accurately
+    - When querying the database, use appropriate SQL queries to retrieve customer, order, and product information
+    - Always verify customer identity before providing sensitive information
+</guidelines>
+
+Available tools include:
+- Warranty check and status lookup
+- Customer profile retrieval
+- Product catalog and review queries (DynamoDB)
+- Customer database queries (PostgreSQL via Neon)
+- Current time information
+
+Use these tools effectively to provide comprehensive customer support.
+"""
 
 
 def get_required_env(name: str) -> str:
@@ -35,10 +63,8 @@ MCP_ARN = get_required_env("MCP_ARN")
 GATEWAY_PROVIDER_NAME = get_required_env("GATEWAY_PROVIDER_NAME")
 MCP_PROVIDER_NAME = get_required_env("MCP_PROVIDER_NAME")
 
-# Aurora PostgreSQL environment variables
-AURORA_CLUSTER_ARN = get_required_env("AURORA_CLUSTER_ARN")
-AURORA_SECRET_ARN = get_required_env("AURORA_SECRET_ARN")
-AURORA_DATABASE = get_required_env("AURORA_DATABASE")
+# Neon PostgreSQL environment variables
+NEON_SECRET_ARN = get_required_env("NEON_SECRET_ARN")
 AWS_REGION = os.getenv("AWS_REGION", MCP_REGION)
 
 # Lazy-loaded configuration
@@ -139,28 +165,24 @@ def initialize_clients():
         )
     )
 
-    aurora_mcp_env = {
-        "FASTMCP_LOG_LEVEL": "DEBUG",
-        "AWS_REGION": AWS_REGION,
-        "AWS_DEFAULT_REGION": AWS_REGION,
-    }
-    aurora_client = MCPClient(
+    # Get Neon credentials from Secrets Manager and create connection string
+    logger.info("Fetching Neon credentials from Secrets Manager")
+    neon_secret = get_secret(NEON_SECRET_ARN)
+    neon_connection_string = (
+        f"postgresql://{neon_secret['username']}:{neon_secret['password']}"
+        f"@{neon_secret['host']}:{neon_secret['port']}/{neon_secret['database']}"
+        f"?sslmode={neon_secret.get('sslmode', 'require')}"
+    )
+
+    logger.info("Initializing Neon PostgreSQL MCP client")
+    neon_client = MCPClient(
         lambda: stdio_client(
             StdioServerParameters(
-                command="awslabs.postgres-mcp-server",
+                command="uvx",
                 args=[
-                    "--resource_arn",
-                    AURORA_CLUSTER_ARN,
-                    "--secret_arn",
-                    AURORA_SECRET_ARN,
-                    "--database",
-                    AURORA_DATABASE,
-                    "--region",
-                    AWS_REGION,
-                    "--readonly",
-                    "True",
-                ],
-                env=aurora_mcp_env,
+                    "mcp-server-postgres",
+                    neon_connection_string
+                ]
             )
         )
     )
@@ -169,30 +191,29 @@ def initialize_clients():
     logger.info("Starting MCP clients")
     gateway_client.start()
     mcp_client.start()
-    aurora_client.start()
+    neon_client.start()
 
     # Store clients in context
     CustomerSupportContext.set_mcp_client_ctx(mcp_client)
     CustomerSupportContext.set_gateway_client_ctx(gateway_client)
-    CustomerSupportContext.set_aurora_mcp_client_ctx(aurora_client)
+    CustomerSupportContext.set_neon_mcp_client_ctx(neon_client)
 
     logger.info("Listing tools from clients")
     gateway_tools = gateway_client.list_tools_sync()
     mcp_tools = mcp_client.list_tools_sync()
-    aurora_tools = aurora_client.list_tools_sync()
+    neon_tools = neon_client.list_tools_sync()
 
     # Initialize agent
     logger.info(f"Initializing agent with model: {MODEL_ID}")
     model = BedrockModel(model_id=MODEL_ID)
     agent = Agent(
         model=model,
-        tools=gateway_tools + mcp_tools + aurora_tools,
+        tools=gateway_tools + mcp_tools + neon_tools,
         system_prompt=SYSTEM_PROMPT,
     )
 
-    agent.tool.get_table_schema(table_name="users")
-    agent.tool.get_table_schema(table_name="products")
-    agent.tool.get_table_schema(table_name="orders")
+    # Note: Schema discovery with Neon is handled by mcp-server-postgres automatically
+    # No need to manually call get_table_schema
 
     CustomerSupportContext.set_agent_ctx(agent)
     logger.info("Agent initialized successfully")
@@ -224,13 +245,13 @@ async def lifespan(app):
         except Exception as e:
             logger.error(f"Error stopping gateway client: {e}")
 
-    aurora_client = CustomerSupportContext.get_aurora_mcp_client_ctx()
-    if aurora_client is not None:
+    neon_client = CustomerSupportContext.get_neon_mcp_client_ctx()
+    if neon_client is not None:
         try:
-            aurora_client.stop()
-            logger.info("Aurora client stopped")
+            neon_client.stop()
+            logger.info("Neon client stopped")
         except Exception as e:
-            logger.error(f"Error stopping Aurora client: {e}")
+            logger.error(f"Error stopping Neon client: {e}")
 
 
 app = BedrockAgentCoreApp(lifespan=lifespan)
